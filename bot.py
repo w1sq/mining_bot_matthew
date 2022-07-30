@@ -93,7 +93,13 @@ class TG_Bot():
                     await message.answer('Фраза', reply_markup=local_keyb.row(KeyboardButton(f"✨ Генерировать фразу ({user.phrases_limit-1})")))
 
     async def _get_profile_info(self, message:aiogram.types.Message, user:User):
-        pass
+        name_dict = {False:'Отсутствует', True:'Куплен'}
+        await message.answer(f"👤 Ваш профиль:\n\n├ ID: {user.id}\n├ Ваш никнейм: {message['from']['username']}\n├ Ваше имя: {message['from']['first_name']}\n├ Наличие доступа: {name_dict[user.access]}\n\n├ Реферальная ссылка:\n├ https://t.me/chance_wallet_bot?start={user.id}")
+
+    async def _get_qa_info(self, message:aiogram.types.Message, user:User):
+        qa_link_keyboard = InlineKeyboardMarkup().row(InlineKeyboardButton(text='ВОПРОС-ОТВЕТ', url='https://telegra.ph/VOPROS-OTVET-07-13-2'))
+        await message.answer(text='📑 Прочитайте статью, которую мы подготовили для вас.:', reply_markup=qa_link_keyboard)
+        await message.answer(text='⁉️ Не нашли ответ на свой вопрос? - @petorlov\n\nПостарайтесь коротко и в одном сообщении изложить вопрос или проблему, с которой столкнулись, а мы рассмотрим её в ближайшее время.')
 
     def _init_handler(self):
         self._dispatcher.register_message_handler(self._subscription_middleware(self._user_middleware(self._show_menu)), commands=['start'])
@@ -108,6 +114,7 @@ class TG_Bot():
         self._dispatcher.register_message_handler(self._subscription_middleware(self._user_middleware(self._get_support_info)), text='ℹ️ Консультация')
         self._dispatcher.register_message_handler(self._subscription_middleware(self._user_middleware(self._get_support_info)), text='✉️ Поддержка')
         self._dispatcher.register_message_handler(self._subscription_middleware(self._user_middleware(self._get_profile_info)), text='❤️ Профиль')
+        self._dispatcher.register_message_handler(self._subscription_middleware(self._user_middleware(self._get_qa_info)), text='❓️ Вопрос-ответ')
         self._dispatcher.register_message_handler(self._subscription_middleware(self._user_middleware(self._generate_phrase)), aiogram.dispatcher.filters.Text(startswith="✨ Генерировать фразу "))
         # self._dispatcher.register_message_handler(self._subscription_middleware(self._user_middleware(self._skip_education)), text='↘️ Пропустить')
         # self._dispatcher.register_message_handler(self._subscription_middleware(self._user_middleware(self._buy_program)), text='✅ Купить программу')
