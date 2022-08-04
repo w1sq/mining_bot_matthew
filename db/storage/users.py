@@ -1,5 +1,5 @@
-from ..db import DB
-from typing import Union, List
+from db.db import DB
+from typing import List
 from dataclasses import dataclass
 
 @dataclass
@@ -13,6 +13,7 @@ class User:
     role:str
     actual_limit:int
     daily_limit:int
+    present:bool
 
 class UserStorage():
     __table = "users"
@@ -25,7 +26,8 @@ class UserStorage():
                 id BIGINT PRIMARY KEY,
                 role TEXT,
                 actual_limit BIGINT,
-                daily_limit BIGINT
+                daily_limit BIGINT,
+                present BOOLEAN
             )
         ''')
 
@@ -33,7 +35,7 @@ class UserStorage():
         data = await self._db.fetchrow(f"SELECT * FROM {self.__table} WHERE id = $1", id)
         if data is None:
             return None
-        return User(data[0], data[1], data[2], data[3])
+        return User(data[0], data[1], data[2], data[3], data[4])
 
     async def promote_to_admin(self, id:int):
         await self._db.execute(f"UPDATE {self.__table} SET role = $1 WHERE id = $2", User.ADMIN, id)
@@ -49,11 +51,17 @@ class UserStorage():
 
     async def create(self, user:User):
         await self._db.execute(f'''
-            INSERT INTO {self.__table} (id, role, actual_limit, daily_limit) VALUES ($1, $2, $3, $4)
-        ''', user.id, user.role, user.actual_limit, user.daily_limit)
+            INSERT INTO {self.__table} (id, role, actual_limit, daily_limit, present) VALUES ($1, $2, $3, $4, $5)
+        ''', user.id, user.role, user.actual_limit, user.daily_limit, user.present)
 
     async def reset_limit(self, user:User):
         await self._db.execute(f"UPDATE {self.__table} SET actual_limit = daily_limit WHERE id = $1", user.id)
+
+    async def reset_present(self, user:User):
+        await self._db.execute(f"UPDATE {self.__table} SET present = FALSE WHERE id = $1", user.id)
+
+    async def activate_present(self, user:User):
+        await self._db.execute(f"UPDATE {self.__table} SET present = TRUE WHERE id = $1", user.id)
 
     async def get_all_members(self) -> List[User]| None:
         data = await self._db.fetch(f'''
@@ -61,7 +69,19 @@ class UserStorage():
         ''')
         if data is None:
             return None
-        return [User(user_data[0], user_data[1], user_data[2], user_data[3]) for user_data in data]
+        return [User(user_data[0], user_data[1], user_data[2], user_data[3], user_data[4]) for user_data in data]
+
+    async def get_paid_members(self) -> List[User]| None:
+        data = await self._db.fetch(f'''SELECT * FROM {self.__table} WHERE role = $1''', User.PAID)
+        if data is None:
+            return None
+        return [User(user_data[0], user_data[1], user_data[2], user_data[3], user_data[4]) for user_data in data]
+
+    async def get_unpaid_members(self) -> List[User]| None:
+        data = await self._db.fetch(f'''SELECT * FROM {self.__table} WHERE role = $1''', User.USER)
+        if data is None:
+            return None
+        return [User(user_data[0], user_data[1], user_data[2], user_data[3], user_data[4]) for user_data in data]
 
     async def give_referal(self, inviter_id:int):
         await self._db.execute(f'''
@@ -76,6 +96,12 @@ class UserStorage():
 
     async def decrease_phrases(self, user:User):
         await self._db.execute(f"UPDATE {self.__table} SET actual_limit = actual_limit - 1 WHERE id = $1", user.id)
+
+    async def ban_user(self, user_id:User):
+        await self._db.execute(f"UPDATE {self.__table} SET role = $1 WHERE id = $2", User.BLOCKED, user_id)
+    
+    async def unban_user(self, user_id:User):
+        await self._db.execute(f"UPDATE {self.__table} SET role = $1 WHERE id = $2", User.USER, user_id)
 
     async def add_paid(self, user:User):
         await self._db.execute(f"UPDATE {self.__table} SET role = $1 WHERE id = $2", User.PAID, user.id)

@@ -1,9 +1,9 @@
 import asyncio
 from db.db import DB
-from bot import TG_Bot
 from db.storage import UserStorage, PhrasesStorage, KeysStorage
 from config import Config
-import aioschedule as schedule
+from db.storage import Key
+import asyncpg
 
 async def init_db():
     db = DB(host=Config.host, port=Config.port, login=Config.login, password=Config.password, database = Config.database)
@@ -16,18 +16,20 @@ async def init_db():
     await keys_storage.init()
     return user_storage, phrases_storage, keys_storage
 
-async def check_schedule():
-    while True:
-        await schedule.run_pending()
-        await asyncio.sleep(1)
-
 async def main():
     user_storage, phrases_storage, keys_storage = await init_db()
-    tg_bot = TG_Bot(user_storage, phrases_storage, keys_storage)
-    await tg_bot.init()
-    await tg_bot.start()
+    with open('db.txt','r') as f:
+        dbs=f.readlines()
+        i = 0
+        for db in dbs:
+            print(i)
+            i += 1
+            db_db = Key(text=db)
+            try:
+                await keys_storage.create(db_db)
+            except asyncpg.exceptions.UniqueViolationError:
+                pass
 
 if __name__ == '__main__':
     loop = asyncio.get_event_loop()
-    loop.create_task(check_schedule())
     loop.run_until_complete(main())

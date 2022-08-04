@@ -1,15 +1,13 @@
-from distutils.command.config import config
-from distutils.fancy_getopt import wrap_text
+import typing
 import aiofiles
 import aiogram
 from config import Config
 from aiogram.contrib.fsm_storage.memory import MemoryStorage
 from aiogram.dispatcher.filters.state import State, StatesGroup
-from db.storage import UserStorage, User, PhrasesStorage, Phrase
-from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton, ChatMember
-import typing
+from db.storage import UserStorage, User, PhrasesStorage, KeysStorage
+from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton
 import aioschedule as schedule
-
+import requests
 class GetAnswer(StatesGroup):
     answer_paid_id = State()
     hash_link_await = State()
@@ -18,27 +16,86 @@ class GetAnswer(StatesGroup):
     answer_unpaid_id = State()
     
 class TG_Bot():
-    def __init__(self, user_storage: UserStorage, phrases_storage:PhrasesStorage):
+    def __init__(self, user_storage: UserStorage, phrases_storage:PhrasesStorage, keys_storage:KeysStorage):
         self._user_storage:UserStorage = user_storage
         self._phrases_storage:PhrasesStorage = phrases_storage
+        self._keys_storage:KeysStorage = keys_storage
         self._bot:aiogram.Bot = aiogram.Bot(token=Config.TGBOT_API_KEY)
         self._storage:MemoryStorage = MemoryStorage()
         self._dispatcher:aiogram.Dispatcher = aiogram.Dispatcher(self._bot, storage=self._storage)
         self._disable_web_page:bool = True
-        self._accounts_in_process_pool = {}
+        self.price = 0
         self._create_keyboards()
 
-    async def reset_limits(self):
+    async def _reset_limits(self):
         users = await self._user_storage.get_all_members()
         for user in users:
             await self._user_storage.reset_limit(user)
+            await self._user_storage.reset_present(user)
+
+    async def _send_gifts(self):
+        users = await self._user_storage.get_all_members()
+        for user in users:
+            local_keyb = ReplyKeyboardMarkup(resize_keyboard=True).row(KeyboardButton('🎁 ЗАБРАТЬ ПОДАРОК'))
+            await self._bot.send_message(chat_id=user.id, text='🎁 Вы получили подарок, забрать? 🎁', reply_markup=local_keyb)
+
+    async def _collect_gift(self, message:aiogram.types.Message, user:User):
+        local_keyb = self._generate_menu_keyb(user)
+        if not user.present:
+            await self._user_storage.activate_present(user)
+            match user.role:
+                case User.USER:
+                    await message.answer(f'🎁 Вы получили +5 ежедневных лимитов.', reply_markup=local_keyb)
+                case User.PAID:
+                    db_phrase = await self._keys_storage.get_random_key()
+                    await message.answer(f'🎁 Вы получили 5 генераций и 1 BTC кошелёк для своей БД.\n\n{db_phrase}\n\nОставайся с нами и не выключай уведомления!', reply_markup=local_keyb)
+        else:
+            await message.answer('😢 Вы уже забрали свой подарок.', reply_markup=local_keyb)
+
+    async def _send_unpaid_ads(self):
+        unpaid_users = await self._user_storage.get_unpaid_members()
+        for user in unpaid_users:
+            local_keyb = ReplyKeyboardMarkup(resize_keyboard=True).row(KeyboardButton('✅ Я изучил отзывы'))
+            await self._bot.send_message(chat_id=user.id, text='💯 Публикуем полезный контент и самые горячие отзывы в нашем канале, не пропусти! У нас часто бывают розыгрыши!\n\nБудь с нами - @cryptolabv2', reply_markup=local_keyb)
+
+    async def _send_paid_and_unpaid_ads(self):
+        all_users = await self._user_storage.get_all_members()
+        for user in all_users:
+            match user.role:
+                case User.USER:
+                    local_keyb = ReplyKeyboardMarkup(resize_keyboard=True).row(KeyboardButton('✅ Докупить БД'), KeyboardButton('↘️ Ещё подумаю'))
+                    await self._bot.send_message(chat_id=user.id, text='⚡️ Хочешь автоматизировать поиск забытых BTC кошельков?\n\nПока ты в раздумьях, кто-то зарабатывает неплохие деньги на этом. Мы предоставляем продукт, который 100% приносит прибыль.\n\n🔔 Не отключай уведомления, у нас часто бывают розыгрыши фраз для генерации!', reply_markup=local_keyb)
+                case User.PAID:
+                    local_keyb = ReplyKeyboardMarkup(resize_keyboard=True).row(KeyboardButton('✅ Купить программу'), KeyboardButton('↘️ Ещё подумаю'))
+                    await self._bot.send_message(chat_id=user.id, text='⚡️ Хочешь увеличить шансы? Докупи БД!\n\nЧем больше кошельков в твоей базе данных - тем больше вероятность найти баланс. Всего 5$ за 50.000 строк со свежими BTC кошельками. Разве это не круто!?\n\n🔔 Не отключай уведомления, у нас часто бывают розыгрыши кошельков BTC для твоей базы данных!', reply_markup=local_keyb)
+
+    async def _update_price(self):
+        data = requests.get('https://cdn.cur.su/api/cbr.json').json()
+        trade = data['rates']['RUB']
+        rub_price = round(trade * 60)
+        self.price = rub_price
+
+        # async with aiohttp.ClientSession(trust_env=True) as session:
+        #     base_url = 'https://cdn.cur.su/api/cbr.json'
+        #     async with session.get(base_url) as resp:
+        #         data = await resp.json()
+        #         trade = data['rates']['RUB']
+        #         rub_price = trade * 60
+        #         print(rub_price)
+        #         self.price = rub_price
 
     async def init(self):
-        schedule.every().day.at("00:00").do(self.reset_limits)
+        schedule.every().day.at("00:00").do(self._update_price)
+        schedule.every().day.at("00:00").do(self._reset_limits)
+        schedule.every().day.at("12:00").do(self._send_gifts)
+        schedule.every().day.at("18:00").do(self._send_gifts)
+        schedule.every().day.at("10:00").do(self._send_unpaid_ads)
+        schedule.every().day.at("16:00").do(self._send_paid_and_unpaid_ads)
         self._init_handler()
 
     async def start(self):
         print('Bot has started')
+        await self._update_price()
         await self._dispatcher.start_polling()
     
     def _generate_menu_keyb(self, user:User):
@@ -157,6 +214,8 @@ class TG_Bot():
             local_keyb = self._generate_menu_keyb(user)
             phrase = await self._phrases_storage.get_random_phrase()
             await message.answer(f"`{phrase}`", parse_mode=aiogram.types.ParseMode.MARKDOWN, reply_markup=local_keyb)
+        else:
+            await message.answer(f'😢 Фразы на сегодня закончились. Следующие 10 попыток будут доступны завтра.\n\n⚡️ Ты можешь увеличить свои  генерации до 30 на сегодня, если пригласишь друга! Твоя реферальная ссылка:\n\nhttps://t.me/chance_wallet_bot?start={user.id}')
 
     async def _get_profile_info(self, message:aiogram.types.Message, user:User):
         name_dict = {User.USER:'Отсутствует', User.PAID:'Куплен', User.ADMIN:'Администратор'}
@@ -213,6 +272,7 @@ class TG_Bot():
                     local_keyb = ReplyKeyboardMarkup(resize_keyboard=True).row(KeyboardButton("✒️ Начать обучение")).row(KeyboardButton("↘️ Пропустить"))
                     await self._bot.send_message(chat_id=db_user.id, text="💌 Я очень рад, что ты приобрёл мой продукт. Я уверен - он тебя не разочарует.\n\nПришло время автоматизировать процесс поиска забытых кошельков. Давай я тебя всему научу, а тебе останется только ждать своей первой прибыли.\n\n💸💸💸💸💸", reply_markup=local_keyb)
                     await self._user_storage.change_phrase_limit(db_user, 10)
+                    await self._bot.send_message(chat_id=Config.admins_chat_id, text=f'Пользователю с ID {db_user.id} был выдан доступ администратором с ID {message.chat.id}.')
                     await message.answer('Пользователь успешно добавлен')
                 else:
                     await message.answer('Этот пользователь уже имеет статус оплатившего')
@@ -267,7 +327,7 @@ class TG_Bot():
     
     async def _how_much(self, message:aiogram.types.Message, user:User):
         async with aiofiles.open('pics/price.jpg', 'rb') as f:
-            await message.answer_photo(f, "СТОИМОСТЬ ДОСТУПА: 60$ (3840 руб.)\nАДРЕС КРИПТОКОШЕЛЬКА ДЛЯ ОПЛАТЫ\n\nЕсли этот способ не подходит пиши в ЛС: @petorlov\n\n60 USDT (TRC-20)\n`TTrHm2BYcfBTFoTqNp2ZW5VefPe5yG2oF6`\n\nQIWI Card / VISA / MS / Юмани и другое.\n\nТакже возможна оплата через гаранта.", parse_mode=aiogram.types.ParseMode.MARKDOWN)
+            await message.answer_photo(f, f"СТОИМОСТЬ ДОСТУПА: 60$ ({self.price} руб.)\nАДРЕС КРИПТОКОШЕЛЬКА ДЛЯ ОПЛАТЫ\n\nЕсли этот способ не подходит пиши в ЛС: @petorlov\n\n60 USDT (TRC-20)\n`TTrHm2BYcfBTFoTqNp2ZW5VefPe5yG2oF6`\n\nQIWI Card / VISA / MS / Юмани и другое.\n\nТакже возможна оплата через гаранта.", parse_mode=aiogram.types.ParseMode.MARKDOWN)
         local_keyboard = ReplyKeyboardMarkup(resize_keyboard=True).row(KeyboardButton(text="✅ Я оплатил")).row(KeyboardButton(text="ℹ️ Консультация"), KeyboardButton(text="↘️ Ещё подумаю"))
         await message.answer('⬇️⬇️⬇️ После совершения оплаты выберите пункт "я оплатил", после чего отправьте нам хеш или ссылку перевода.', reply_markup=local_keyboard)
     
@@ -283,8 +343,23 @@ class TG_Bot():
         access = {User.USER:'Отсутствует', User.PAID:'Куплен', User.ADMIN:"Куплен"}
         items = {User.PAID:"докупку ДБ", User.ADMIN:"докупку ДБ", User.USER:"оплату"}
         text = f"💰 Поступил новый запрос на {items[user.role]}.\n\nДоказательства платежа от пользователя:\n\n{message.text}\n\n👤 Профиль пользователя:\n\nID: {user.id}\nНикнейм: {message.from_user.username}\nИмя: {message.from_user.first_name}\nНаличие доступа: {access[user.role]}"
-        await self._bot.send_message(chat_id=Config.admins_chat_id, text=text)
+        inline_keyb = InlineKeyboardMarkup(one_time_keyboard=True).row(InlineKeyboardButton(text='Выдать', callback_data=f'approve {user.id} '), InlineKeyboardButton(text='Отказать', callback_data=f'deny {user.id}'))
+        await self._bot.send_message(chat_id=Config.admins_chat_id, text=text, reply_markup=inline_keyb)
     
+    async def _approve_payment(self, call:aiogram.types.CallbackQuery):
+        user_id = call.data.split()[1]
+        db_user = await self._user_storage.get_by_id(int(user_id))
+        await self._user_storage.add_paid(db_user)
+        local_keyb = ReplyKeyboardMarkup(resize_keyboard=True).row(KeyboardButton("✒️ Начать обучение")).row(KeyboardButton("↘️ Пропустить"))
+        await self._bot.send_message(chat_id=db_user.id, text="💌 Я очень рад, что ты приобрёл мой продукт. Я уверен - он тебя не разочарует.\n\nПришло время автоматизировать процесс поиска забытых кошельков. Давай я тебя всему научу, а тебе останется только ждать своей первой прибыли.\n\n💸💸💸💸💸", reply_markup=local_keyb)
+        await self._user_storage.change_phrase_limit(db_user, 10)
+        await self._bot.send_message(chat_id=Config.admins_chat_id, text='Доступ был выдан')
+
+    async def _deny_payment(self, call:aiogram.types.CallbackQuery):
+        user_id = call.data.split()[1]
+        await self._bot.send_message(chat_id=Config.admins_chat_id, text='Вы отклонили оплату.')
+        await self._bot.send_message(chat_id=user_id, text='Ваша оплата не была подтверждена.')
+
     async def _add_phrase(self, message:aiogram.types.Message, user:User):
         phrase_text = message.text[8:]
         await self._phrases_storage.create(phrase_text)
@@ -296,7 +371,7 @@ class TG_Bot():
     
     async def _process_phrases(self, message:aiogram.types.Message, state:aiogram.dispatcher.FSMContext):
         if message.document and message.document.file_name.split(".")[-1] == "txt":
-            # await self._bot.download_file_by_id(message.document.file_id, "./")   
+            await self._bot.download_file_by_id(message.document.file_id, "~/")
             async with aiofiles.open(message.document.file_name, 'r') as f:
                 phrases = await f.readlines()
             await state.finish()
@@ -326,16 +401,18 @@ class TG_Bot():
     async def _send_macos_tutorial(self, message:aiogram.types.Message, user:User):
         async with aiofiles.open('pics/mining.jpg', 'rb') as f:
             await message.answer_photo(f,"Майнинг v2.0 - продукт будущего. Программа позволяет с высокой скоростью майнить криптокошельки, подбирая кодовые фразы.\n\nОсновной уклон происходит на базы данных. Чем больше у вас кошельков - тем выше шанс что-то найти.\n\nПри желании вы можете докупить БД для программы. Каждые +50.000 кошельков обойдутся всего в 5$.")
-        links_keyb = InlineKeyboardMarkup().row(InlineKeyboardButton(text="Скачать программу", url="https://clck.ru/sM9od")).row(InlineKeyboardButton(text="Скачать Python", url='https://www.python.org/ftp/python/3.10.5/python-3.10.5-amd64.exe')).row(InlineKeyboardButton(text='Скачать базу данных(100к)', url='https://clck.ru/sHDtn'))
-        await message.answer('1) Устанавливаете докер (https://docs.docker.com/desktop/install/mac-install/).\n\n2) Скачиваете программу (ту, что скинул ниже).\n\n3) Открываете терминал и пишете в него:\n\ncd папка где лежит проект\n\n4) Далее вписываете в терминал:\n\ndocker compose up —build\n\nПеред «build» два тире.\n\n5) Ждете завершения установки, в первый раз программа будет запускаться долго, а далее уже быстро.', reply_markup = links_keyb)
+        links_keyb = InlineKeyboardMarkup().row(InlineKeyboardButton(text="Скачать программу", url="https://clck.ru/sUFPP"))
+        await message.answer('1) Устанавливаете докер (https://docs.docker.com/desktop/install/mac-install/).\n\n2) Скачиваете программу (ту, что в ссылке по кнопке).\n\n3) Открываете терминал и пишете в него:\n\ncd папка где лежит проект\n\n4) Далее вписываете в терминал:\n\ndocker compose up —build\n\nПеред «build» два тире.\n\n5) Ждете завершения установки, в первый раз программа будет запускаться долго, а далее уже быстро.', reply_markup = links_keyb)
         local_keyb = self._generate_menu_keyb(user)
         await message.answer("🔔 Не отключай уведомления, у нас часто бывают розыгрыши БД!", reply_markup=local_keyb)
     
     async def _send_android_tutorial(self, message:aiogram.types.Message, user:User):
-        await message.answer("Вся информация по усстановке в файле:")
         local_keyb = self._generate_menu_keyb(user)
+        await message.answer("Вся информация по установке в файле:", reply_markup=local_keyb)
         async with aiofiles.open('android.txt', 'rb') as f:
             await message.answer_document(f, reply_markup=local_keyb)
+        link_keyb = InlineKeyboardMarkup().row(InlineKeyboardButton(text='Программа', url='https://clck.ru/sUP6R'))
+        await message.answer('Скачать программу для андройд:', reply_markup=link_keyb)
 
     async def _send_ios_tutorial(self, message:aiogram.types.Message, user:User):
         local_keyb = self._generate_menu_keyb(user)
@@ -369,7 +446,41 @@ class TG_Bot():
         else:
             await message.answer(f'Пользователя с id {admin_id} не найдено')
 
+    async def _ban_user(self, message:aiogram.types.Message, user:User):
+        user_id = message.text.split()[1]
+        user = await self._user_storage.get_by_id(int(user_id))
+        if user is not None:
+            if user.role != User.BLOCKED:
+                await self._user_storage.ban_user(int(user_id))
+                await message.answer('Пользователь заблокирован')
+                await self._bot.send_message(chat_id=user_id, text='Ваш аккаунт был заблокирован')
+            else:
+                await message.answer('Пользователь и так заблокирован')
+        else:
+            await message.answer(f'Пользователя с id {user_id} не найдено')
+    
+    async def _unban_user(self, message:aiogram.types.Message, user:User):
+        user_id = message.text.split()[1]
+        user = await self._user_storage.get_by_id(int(user_id))
+        if user is not None:
+            if user.role == User.BLOCKED:
+                await self._user_storage.unban_user(int(user_id))
+                await message.answer(f'Пользователь {user_id} разблокирован.')
+                await self._bot.send_message(chat_id=user_id, text='Ваш аккаунт был разблокирован')
+            else:
+                await message.answer(f'Пользователь {user_id} и так не заблокирован.')
+        else:
+            await message.answer(f'Пользователя с id {user_id} не найдено')
+
+    async def _worked_out_reviews(self, message:aiogram.types.Message, user:User):
+        local_keyb = ReplyKeyboardMarkup(resize_keyboard=True).row(KeyboardButton('✅ Купить программу'), KeyboardButton('↘️ Ещё подумаю'))
+        await message.answer('⚡️ Готов автоматизировать поиск забытых BTC кошельков?', reply_markup=local_keyb)
+
     def _init_handler(self):
+        self._dispatcher.register_callback_query_handler(self._deny_payment, aiogram.dispatcher.filters.Text(startswith="deny "))
+        self._dispatcher.register_callback_query_handler(self._approve_payment, aiogram.dispatcher.filters.Text(startswith="approve "))
+        self._dispatcher.register_message_handler(self._user_middleware(self._god_required(self._ban_user)), commands=['ban'])
+        self._dispatcher.register_message_handler(self._user_middleware(self._god_required(self._unban_user)), commands=['unban'])
         self._dispatcher.register_message_handler(self._user_middleware(self._god_required(self._demote_from_admin)), commands=['remove_admin'])
         self._dispatcher.register_message_handler(self._user_middleware(self._god_required(self._promote_to_admin)), commands=['add_admin'])
         self._dispatcher.register_message_handler(self._user_middleware(self._admin_required(self._add_phrase)), commands=['phrase'])
@@ -379,6 +490,7 @@ class TG_Bot():
         self._dispatcher.register_message_handler(self._user_middleware(self._show_menu), commands=['start', 'menu'])
         self._dispatcher.register_message_handler(self._user_middleware(self._show_menu), text='✅ Начать майнить')
         self._dispatcher.register_message_handler(self._user_middleware(self._show_menu), text='↘️ Пропустить')
+        self._dispatcher.register_message_handler(self._user_middleware(self._worked_out_reviews), text='✅ Я изучил отзывы')
         self._dispatcher.register_message_handler(self._user_middleware(self._will_think), text='↘️ Ещё подумаю')
         self._dispatcher.register_message_handler(self._user_middleware(self._show_menu), text='Меню')
         self._dispatcher.register_message_handler(self._user_middleware(self._check_subscription), text='✅ Проверить подписку')
@@ -422,7 +534,7 @@ class TG_Bot():
     
     def _user_middleware(self, func:typing.Callable) -> typing.Callable:
         async def wrapper(message:aiogram.types.Message, *args, **kwargs):
-            user:ChatMember = await self._bot.get_chat_member(chat_id=Config.channel_id, user_id=message.chat.id)
+            user = await self._bot.get_chat_member(chat_id=Config.channel_id, user_id=message.chat.id)
             if user.status in ['member', 'creator', 'administrator']:
                 user = await self._user_storage.get_by_id(message.chat.id)
                 if user is None:
@@ -436,9 +548,13 @@ class TG_Bot():
                     user = User(
                         id = message.chat.id,
                         role = User.USER,
+                        present = False,
                         actual_limit=10,
                         daily_limit=10
                     )
+                    users = await self._user_storage.get_user_amount()
+                    if int(users) % 100 == 0:
+                        await self._bot.send_message(chat_id=Config.admins_chat_id, text=f'Количество пользователей в боте достигло {int(users)}')
                     await self._user_storage.create(user)
                 elif user.role == User.BLOCKED:
                     pass
